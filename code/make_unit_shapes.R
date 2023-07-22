@@ -9,6 +9,8 @@
 library(tidyverse)
 library(aws.s3)
 library(sf)
+# library(dismo)
+library(units)
 library(readxl)
 library(xlsx)
 library(stringr)
@@ -40,5 +42,145 @@ pas <- s3read_using(
 #   opts = c("check_region" = T)
 # )
 
+#the average parc size is 12933.13 [hectare] (but this is with big parks in the north)
+set_units(st_area(pas), "hectare") %>% mean()
+set_units(st_area(pas), "hectare") %>% median()
+# assume that in the tropical region, the mean is around 10 kha and the median around 5 kha. 
+# If we consider 100-ha in-park polygons, this means splitting the average park in 100 bits and the median park in 50 bits. 
 
+#---------------Previous rationale to program size of things with the DISC method -----------------------
+
+# We would like the final discs to fit in 1x1km squares (100 ha), approx. 
+# The radius of such disc is half the square side: 500 m. 
+# This is pi*500^2 = 785398.2 m2 = 78.54 ha. 
+# And we want our in-park units to be twice smaller than the discs, since discs tend to have one half in and one half outside the park. 
+# Hence, in-park units should be ~40 ha large. 
+
+# If would like the final discs to fit in 9x9km squares (8100 ha), approx. 
+# The radius of such disc is half the square side: 4500 m. 
+# This is pi*4500^2 = 63617251 m2 = 6361.73 ha. 
+# And we want our in-park units to be twice smaller than the discs, since discs tend to have one half in and one half outside the park. 
+# Hence, in-park units should be ~3181 ha large. 
+
+# To be given in HECTARES
+# INPARK_UNIT_SIZE <- 40 %>% set_units("hectare")
+
+# --------------Current rationale to program size of things with the VORONOI method -----------------------
+# In this case, the out-park area is the same as the in-parc one, there is no disc. 
+# intuitively: imagine two squares of the same area, one in the park one outside, and they share one of their sides, on the park bord.  
+# In this case, we define the in-park area directly as the final resolutions, either 1x1km or 9x9km. 
+INPARK_UNIT_SIZE <- 100 %>% set_units("hectare")
+# and from there, we set the buffer depth in relation to the in-park unit size. 
+# The average in-parc unit, assumed squared, has a border of square-root of its area. 
+# The voronoi that has the same area, needs to be trimmed at this border size as well (assuming it's a square too)
+# THIS IS IN **METER**
+out_buffer_size <- sqrt(set_units(INPARK_UNIT_SIZE, NULL) * 10000)
+
+# NOTE: this method does not work for 9x9km res, it's too big. 
+# (and so probably even the 100ha for 1x1km res. will be too big for some small parks)
+# --> for 9x9km, will need to find another solution, like downscaling GAEZ and then accommodate by spatial clustering s.e. at GAEZ or more res. 
+# --> for 1x1km, we can remove smallest parks from study. 
+
+pas <- pas %>% dplyr::select(WDPAID)
+sf_poly <- pas[4,]
+sf_poly <- st_simplify(sf_poly, dTolerance = 10)
+
+make_units <- function(sf_poly, out_buffer_size){
+  # make a buffer around the park 
+  out_buffer <- st_buffer(sf_poly, out_buffer_size)
+  
+  # determine n_areas from sf_poly area. 
+  n_areas <- (set_units(st_area(sf_poly), "hectare") / INPARK_UNIT_SIZE) %>% set_units(NULL) %>% round()
+  # create random points
+  set.seed(4321)
+  points_rnd <- st_sample(sf_poly, size = 10000)
+  #k-means clustering
+  points <- do.call(rbind, st_geometry(points_rnd)) %>%
+    as_tibble() %>% setNames(c("lon","lat"))
+  k_means <- kmeans(points, centers = n_areas)
+  # create voronoi polygons
+  voronoi_polys <- dismo::voronoi(k_means$centers, ext = out_buffer)#out_buffer
+  # clip to sf_poly
+  crs(voronoi_polys) <- crs(sf_poly)
+  voronoi_sf <- st_as_sf(voronoi_polys)
+  
+  equal_areas <- st_intersection(voronoi_sf, sf_poly)
+  equal_areas$area <- st_area(equal_areas) # Leave this in square meters
+  equal_areas <- equal_areas %>% rename(INPARK_UNIT_ID = id)
+  
+  tmt_vor <- st_difference(voronoi_sf, sf_poly) %>% st_intersection(out_buffer)
+  tmt_vor$area <- st_area(tmt_vor) # Leave this in square meters
+  tmt_vor <- tmt_vor %>% rename(INPARK_UNIT_ID = id)
+  mean(set_units(tmt_vor$area, "hectare"))
+  
+  # Now extract lines at the intersection of these equal area shapes and the park boundaries
+  # Define the parc as a MULTILINESTRING, rather than a MULTIPOLYGON
+  park_bnd  <- st_boundary(sf_poly) %>% st_geometry()# keep only the geometry, to not repeat the id
+  park_bnd == st_cast(sf_poly, to = "MULTILINESTRING") %>% st_geometry() # (yields exactly the same)
+  
+  # this has less or as many features as equal_areas, because it drops the equal_areas features that are entirely within the park.   
+  edges <- st_intersection(equal_areas, park_bnd)
+  # some are only points, remove them
+  # st_geometry_type(edges$geometry)
+  # edges <- edges %>% filter(!grepl("POINT", st_geometry_type(geometry)))
+  
+  # edges2 <- edges %>% filter(st_geometry_type(geometry) == "MULTILINESTRING") %>% st_line_merge()
+  
+  # equal_area_55 <-  equal_areas %>% filter(INPARK_UNIT_ID==19)
+  # edge_55 <- edges %>% filter(INPARK_UNIT_ID==19)
+  # plot(st_geometry(equal_area_55))
+  # plot(st_geometry(edge_55), add = T, col = "red")
+  
+    # define buffer radius such that the area of the disc is two times the equal area 
+  radius = sqrt(2*mean(set_units(equal_areas$area, NULL))/pi)
+  
+  disc_centro <- 
+    edges %>% 
+    st_centroid() 
+  
+  tmt_disc <- 
+    edges %>% 
+    st_centroid() %>% 
+    st_buffer(radius) %>% 
+    # remove the part inside the park to define the treatment zone
+    st_difference(sf_poly)
+  
+  # # Since this leaves significant shares of PA borders uncovered by treatment discs, add a buffer area
+  # # Another method is to make a buffer around the edges
+  # tmt_buf <- 
+  #   edges %>% 
+  #   st_buffer(radius) %>% 
+  #   # remove the part inside the park to define the treatment zone
+  #   st_difference(sf_poly)
+  
+  return(equal_areas)
+}
+
+plot(st_geometry(sf_poly))
+plot(st_geometry(equal_areas), add = T)
+
+plot(st_geometry(sf_poly))
+plot(st_geometry(edges), add = T, col = "blue")
+plot(st_geometry(edges_disc), add = T, col = "blue")
+
+plot(st_geometry(sf_poly))
+plot(st_geometry(disc_centro), add = T, col = "red")
+plot(st_geometry(equal_areas), add = T)
+plot(tmt_disc[,"INPARK_UNIT_ID"], add = T)
+
+plot(st_geometry(sf_poly))
+plot(st_geometry(equal_areas), add = T)
+plot(tmt_vor[,"INPARK_UNIT_ID"], add = T)
+
+
+ggplot(data = equal_areas) + 
+  geom_sf() +
+  geom_sf_text(
+    aes(label = INPARK_UNIT_ID), data = equal_areas,
+  )
+
+ggplot(data = equal_areas[equal_areas$INPARK_UNIT_ID==40,]) + geom_sf()
+
+
+tmp <- equal_areas[equal_areas$INPARK_UNIT_ID==40,]
 
