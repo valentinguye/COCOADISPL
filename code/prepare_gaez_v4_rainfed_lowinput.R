@@ -100,11 +100,6 @@ gaez_all <- brick(rasterlist_gaez)
 
 gaez_all <- projectRaster(gaez_all, crs = 32630)
 
-writeRaster(gaez_all, here("temp_data", "GAEZ_v4", "AES_index_value", "Rain-fed", "low_input_staples_proj.tif"), 
-            overwrite = TRUE)
-
-gaez_all <- brick(here("temp_data", "GAEZ_v4", "AES_index_value", "Rain-fed", "low_input_staples_proj.tif"))
-
 gaez_max <- overlay(gaez_all, fun = max, na.rm = TRUE)
 gaez_avg <- overlay(gaez_all, fun = mean, na.rm = TRUE)
 
@@ -113,9 +108,34 @@ raster::values(gaez_max) %>% max(na.rm = T)
 raster::values(gaez_all) %>% mean(na.rm = T)
 raster::values(gaez_avg) %>% mean(na.rm = T)
 
-# plot(gaez_max)
-# plot(st_geometry(pas), add = T)
+plot(gaez_max)
+pas <- read_sf("input_data/WDPA_PROTECTED_AREAS_GHA_AUG21.gpkg")
+plot(st_geometry(pas), add = T)
 
-rm(rasterlist_gaez, gaez_all)
+writeRaster(gaez_max, 
+            here("temp_data", "GAEZ_v4", "AES_index_value", "Rain-fed", "Low-input", "ghana_staples_max.tif"), 
+            overwrite = TRUE)
+
+writeRaster(gaez_avg, 
+            here("temp_data", "GAEZ_v4", "AES_index_value", "Rain-fed", "Low-input", "ghana_staples_avg.tif"), 
+            overwrite = TRUE)
+
+s3write_using(
+  x = gaez_max,
+  object = "ghana/cocoa/displacement_econometrics/temp_data/GAEZ_v4/AES_index_value/Rain-fed/Low-input/ghana_staples_max.tif",
+  FUN = writeRaster,
+  bucket = "trase-storage",
+  opts = c("check_region" = T)
+)
+
+s3write_using(
+  x = gaez_avg,
+  object = "ghana/cocoa/displacement_econometrics/temp_data/GAEZ_v4/AES_index_value/Rain-fed/Low-input/ghana_staples_avg.tif",
+  FUN = writeRaster,
+  bucket = "trase-storage",
+  opts = c("check_region" = T)
+)
+
+rm(rasterlist_gaez, gaez_all, gaez_max, gaez_avg)
 
 rm(ext, mapmat, mapmat_data)

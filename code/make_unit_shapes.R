@@ -32,7 +32,7 @@ pas <- s3read_using(
   bucket = "trase-storage",
   opts = c("check_region" = T))
 
-pas <- read_sf("input_data/WDPA_PROTECTED_AREAS_GHA_AUG21.gpkg")
+# pas <- read_sf("input_data/WDPA_PROTECTED_AREAS_GHA_AUG21.gpkg")
 pas <- st_simplify(pas, dTolerance = 10)
 
 pas_union <- st_union(st_geometry(pas))
@@ -95,7 +95,7 @@ make_units <- function(sf_poly, inpark_unit_size){
   OUT_BUFFER_SIZE <- sqrt(set_units(INPARK_UNIT_SIZE, NULL) * 10000)
   
   # make a buffer around the park 
-  out_buffer <- st_buffer(sf_poly, OUT_BUFFER_SIZE) %>% select(-1) # (remove the park ID from this object, it's redundant)
+  out_buffer <- st_buffer(sf_poly, OUT_BUFFER_SIZE) %>% dplyr::select(-1) # (remove the park ID from this object, it's redundant)
   
   # determine n_areas from sf_poly area. 
   n_areas <- (set_units(st_area(sf_poly), "hectare") / INPARK_UNIT_SIZE) %>% set_units(NULL) %>% ceiling() # ceiling makes sure that n_areas is minimum 1
@@ -222,20 +222,44 @@ for(PA in unique(pas$WDPAID)[1:10]){
   print(match(PA, unique(pas$WDPAID)))# print progress
 }
 
-for(PA in unique(pas$WDPAID)[1:10]){
+for(PA in unique(pas$WDPAID)){
   collect_list_GAEZ_scale[[as.character(PA)]] <- make_units(sf_poly = pas[pas$WDPAID == PA,], 
                                                  inpark_unit_size = 8100)
   print(match(PA, unique(pas$WDPAID)))# print progress
 }
 
-output_sf <- bind_rows(collect_list)  
+output_sf_gaez <- bind_rows(collect_list_GAEZ_scale)  
+row.names(output_sf_gaez) <- NULL
 
-length(unique(output_sf$UNIT_ID))*2 == nrow(output_sf)
+length(unique(output_sf_gaez$WDPAID)) # 102 parks
 
-plot(output_sf[,"IN_OR_OUT"], add = T)
+length(unique(output_sf_gaez$UNIT_ID))*2 == nrow(output_sf_gaez)
+
+plot(output_sf_gaez[,"IN_OR_OUT"])
+
+inpark_sf_9km <- output_sf_gaez %>% filter(IN_OR_OUT == "INPARK")
+outpark_sf_9km <- output_sf_gaez %>% filter(IN_OR_OUT == "OUTPARK")
+
+# Export as geojson
+s3write_using(
+  x = inpark_sf_9km,
+  object = paste0("ghana/cocoa/displacement_econometrics/inpark_9km"),
+  FUN = st_write,
+  driver = "GeoJSON",
+  bucket = "trase-storage",
+  opts = c("check_region" = T)
+)
 
 
-
+# Export as geojson
+s3write_using(
+  x = outpark_sf_9km,
+  object = paste0("ghana/cocoa/displacement_econometrics/outpark_9km"),
+  FUN = st_write,
+  driver = "GeoJSON",
+  bucket = "trase-storage",
+  opts = c("check_region" = T)
+)
 
 
 
