@@ -9,7 +9,7 @@
 library(tidyverse)
 library(aws.s3)
 library(sf)
-# library(dismo)
+library(dismo)
 library(units)
 library(readxl)
 library(xlsx)
@@ -70,33 +70,35 @@ set_units(st_area(pas), "hectare") %>% median()
 # INPARK_UNIT_SIZE <- 40 %>% set_units("hectare")
 
 # --------------Current rationale to program size of things with the VORONOI method -----------------------
-# In this case, the out-park area is the same as the in-parc one, there is no disc. 
-# intuitively: imagine two squares of the same area, one in the park one outside, and they share one of their sides, on the park bord.  
-# In this case, we define the in-park area directly as the final resolutions, either 1x1km or 9x9km. 
-INPARK_UNIT_SIZE <- 100 %>% set_units("hectare")
-# and from there, we set the buffer depth in relation to the in-park unit size. 
-# The average in-parc unit, assumed squared, has a border of square-root of its area. 
-# The voronoi that has the same area, needs to be trimmed at this border size as well (assuming it's a square too)
-# THIS IS IN **METER**
-OUT_BUFFER_SIZE <- sqrt(set_units(INPARK_UNIT_SIZE, NULL) * 10000)
+
 
 # NOTE: this method does not work for 9x9km res, it's too big. 
 # (and so probably even the 100ha for 1x1km res. will be too big for some small parks)
 # --> for 9x9km, will need to find another solution, like downscaling GAEZ and then accommodate by spatial clustering s.e. at GAEZ or more res. 
 # --> for 1x1km, we can remove smallest parks from study. 
 
-sf_poly <- pas[4,]
-out_buffer_size <- OUT_BUFFER_SIZE
+sf_poly <- pas[1,]
+inpark_unit_size <- 8100
 
-make_units <- function(sf_poly, out_buffer_size){
+make_units <- function(sf_poly, inpark_unit_size){
   
   sf_poly <- sf_poly %>% dplyr::select(contains("WDPAID"))
   
+  # In this case, the out-park area is the same as the in-parc one, there is no disc. 
+  # intuitively: imagine two squares of the same area, one in the park one outside, and they share one of their sides, on the park bord.  
+  # In this case, we define the in-park area directly as the final resolutions, either 1x1km or 9x9km. 
+  INPARK_UNIT_SIZE <- set_units(inpark_unit_size, "hectares")
+  # From in-park unit size, we set the buffer depth in relation to the in-park unit size. 
+  # The average in-parc unit, assumed squared, has a border of square-root of its area. 
+  # The voronoi that has the same area, needs to be trimmed at this border size as well (assuming it's a square too)
+  # THIS IS IN **METER**
+  OUT_BUFFER_SIZE <- sqrt(set_units(INPARK_UNIT_SIZE, NULL) * 10000)
+  
   # make a buffer around the park 
-  out_buffer <- st_buffer(sf_poly, out_buffer_size) %>% select(-1)
+  out_buffer <- st_buffer(sf_poly, OUT_BUFFER_SIZE) %>% select(-1) # (remove the park ID from this object, it's redundant)
   
   # determine n_areas from sf_poly area. 
-  n_areas <- (set_units(st_area(sf_poly), "hectare") / INPARK_UNIT_SIZE) %>% set_units(NULL) %>% round()
+  n_areas <- (set_units(st_area(sf_poly), "hectare") / INPARK_UNIT_SIZE) %>% set_units(NULL) %>% ceiling() # ceiling makes sure that n_areas is minimum 1
   # create random points
   set.seed(4321)
   points_rnd <- st_sample(sf_poly, size = 10000)
@@ -104,63 +106,68 @@ make_units <- function(sf_poly, out_buffer_size){
   points <- do.call(rbind, st_geometry(points_rnd)) %>%
     as_tibble() %>% setNames(c("lon","lat"))
   k_means <- kmeans(points, centers = n_areas)
-  # create voronoi polygons
-  voronoi_polys <- dismo::voronoi(k_means$centers, ext = out_buffer)#out_buffer
-  # clip to sf_poly
-  voronoi_sf <- st_as_sf(voronoi_polys)
-  st_crs(voronoi_sf) <- st_crs(sf_poly)
   
-  # IN-PARK polygons
-  inpark_sf <- 
-    voronoi_sf %>% 
-    # trim area outside the park
-    st_intersection(sf_poly)
-  
-  inpark_sf <- 
-    inpark_sf %>% 
-    rename(INPARK_UNIT_ID = id) %>% 
-    mutate(AREA_M2 = st_area(geometry), 
-           UNIT_ID = paste0(WDPAID, "-", INPARK_UNIT_ID),
-           IN_OR_OUT = "INPARK")
-  
-  # OUT-PARK Ppolygons
-  outpark_sf <- 
-    voronoi_sf %>% 
-    # remove inner park (this drops features that are fully in the park) - so the ids
-    st_difference(sf_poly) %>% 
-    # keep only area within outter buffer
-    st_intersection(out_buffer) %>% 
-    # remove area that falls within other parks 
-    st_difference(pas_union)
-  
-  outpark_sf <- 
-    outpark_sf %>% 
-    rename(INPARK_UNIT_ID = id) %>% 
-    mutate(AREA_M2 = st_area(geometry), 
-           UNIT_ID = paste0(WDPAID, "-", INPARK_UNIT_ID),
-           IN_OR_OUT = "OUTPARK")
+  if(nrow(k_means$centers)>1){ # condition is equivalent to n_areas == 1
+    # create voronoi polygons
+    voronoi_polys <- dismo::voronoi(k_means$centers, ext = out_buffer)#out_buffer
+    # clip to sf_poly
+    voronoi_sf <- st_as_sf(voronoi_polys)
+    st_crs(voronoi_sf) <- st_crs(sf_poly)
     
+    # IN-PARK polygons
+    inpark_sf <- 
+      voronoi_sf %>% 
+      # trim area outside the park
+      st_intersection(sf_poly)
+    
+    inpark_sf <- 
+      inpark_sf %>% 
+      rename(INPARK_UNIT_ID = id) %>% 
+      mutate(AREA_M2 = st_area(geometry), 
+             UNIT_ID = paste0(WDPAID, "-", INPARK_UNIT_ID),
+             IN_OR_OUT = "INPARK")
+    
+    # OUT-PARK Ppolygons
+    outpark_sf <- 
+      voronoi_sf %>% 
+      # remove inner park (this drops features that are fully in the park) - so the ids
+      st_difference(sf_poly) %>% 
+      # keep only area within outter buffer
+      st_intersection(out_buffer) %>% 
+      # remove area that falls within other parks 
+      st_difference(pas_union)
+    
+    outpark_sf <- 
+      outpark_sf %>% 
+      rename(INPARK_UNIT_ID = id) %>% 
+      mutate(AREA_M2 = st_area(geometry), 
+             UNIT_ID = paste0(WDPAID, "-", INPARK_UNIT_ID),
+             IN_OR_OUT = "OUTPARK")
+      
+    
+    mean(set_units(outpark_sf$AREA_M2, "hectare"))
+    
+    # Keep only in-park polygons that have a matching treatment polygon outside
+    inpark_sf <- 
+      inpark_sf %>% 
+      filter(INPARK_UNIT_ID %in% outpark_sf$INPARK_UNIT_ID)
+    
+    plot(st_geometry(sf_poly))
+    plot(st_geometry(inpark_sf), add = T)
+    plot(outpark_sf[,"INPARK_UNIT_ID"], add = T)
+     
+    # # Check that in and out polygons have the same ID
+    # plot(st_geometry(sf_poly))
+    # plot(st_geometry(inpark_sf[1,"INPARK_UNIT_ID"]), add = T)
+    # plot(outpark_sf[outpark_sf$INPARK_UNIT_ID==inpark_sf[1,]$INPARK_UNIT_ID, "INPARK_UNIT_ID"], add = T)
+    
+    # stack in- and out-park polygons
+    
+    in_out_sf <- rbind(inpark_sf, outpark_sf)
   
-  mean(set_units(outpark_sf$AREA_M2, "hectare"))
-  
-  # Keep only in-park polygons that have a matching treatment polygon outside
-  inpark_sf <- 
-    inpark_sf %>% 
-    filter(INPARK_UNIT_ID %in% outpark_sf$INPARK_UNIT_ID)
-  
-  plot(st_geometry(sf_poly))
-  plot(st_geometry(inpark_sf), add = T)
-  plot(outpark_sf[,"INPARK_UNIT_ID"], add = T)
-   
-  # # Check that in and out polygons have the same ID
-  # plot(st_geometry(sf_poly))
-  # plot(st_geometry(inpark_sf[1,"INPARK_UNIT_ID"]), add = T)
-  # plot(outpark_sf[outpark_sf$INPARK_UNIT_ID==inpark_sf[1,]$INPARK_UNIT_ID, "INPARK_UNIT_ID"], add = T)
-  
-  # stack in- and out-park polygons
-  
-  in_out_sf <- rbind(inpark_sf, outpark_sf)
-  
+  } else {
+    in_out_sf <- NULL
+  }  
   
   # DISC METHOD
   # # Now extract lines at the intersection of these equal area shapes and the park boundaries
@@ -206,10 +213,19 @@ make_units <- function(sf_poly, out_buffer_size){
   return(in_out_sf)
 }
 
-collect_list <- list()
+collect_list_SCHROTH_scale <- list()
+collect_list_GAEZ_scale <- list()
+
 for(PA in unique(pas$WDPAID)[1:10]){
-  collect_list[[as.character(PA)]] <- make_units(sf_poly = pas[pas$WDPAID == PA,], 
-                                                 out_buffer_size = OUT_BUFFER_SIZE)
+  collect_list_SCHROTH_scale[[as.character(PA)]] <- make_units(sf_poly = pas[pas$WDPAID == PA,], 
+                                                 inpark_unit_size = 100)
+  print(match(PA, unique(pas$WDPAID)))# print progress
+}
+
+for(PA in unique(pas$WDPAID)[1:10]){
+  collect_list_GAEZ_scale[[as.character(PA)]] <- make_units(sf_poly = pas[pas$WDPAID == PA,], 
+                                                 inpark_unit_size = 8100)
+  print(match(PA, unique(pas$WDPAID)))# print progress
 }
 
 output_sf <- bind_rows(collect_list)  
