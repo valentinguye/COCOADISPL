@@ -26,25 +26,22 @@ pas <- s3read_using(
   opts = c("check_region" = T))
 
 # WDPA
-pas <- s3read_using(
-  object = "ghana/spatial/BOUNDARIES/PROTECTED_AREAS/WDPA/OUT/WDPA_PROTECTED_AREAS_GHA_AUG21.gpkg",
-  FUN = read_sf,
-  bucket = "trase-storage",
-  opts = c("check_region" = T))
+# pas <- s3read_using(
+#   object = "ghana/spatial/BOUNDARIES/PROTECTED_AREAS/WDPA/OUT/WDPA_PROTECTED_AREAS_GHA_AUG21.gpkg",
+#   FUN = read_sf,
+#   bucket = "trase-storage",
+#   opts = c("check_region" = T))
 
 # pas <- read_sf("input_data/WDPA_PROTECTED_AREAS_GHA_AUG21.gpkg")
 pas <- st_simplify(pas, dTolerance = 10)
 
 pas_union <- st_union(st_geometry(pas))
+plot(pas_union)
 
-# districts <- s3read_using(
-#   object = "ghana/spatial/BOUNDARIES/DISTRICTS_REGIONS/OUT/GHA_DISTRICTS.geojson",
-#   bucket = "trase-storage",
-#   FUN = read_sf,
-#   #sheet = "Cacao", 
-#   #skip = 3,
-#   opts = c("check_region" = T)
-# )
+# MAKE PARK ID - would need to be adjusted for WDPA PARKS throughout script. 
+if(length(unique(pas$NAME)) == nrow(pas)){
+  pas$RMSCID <- seq(1, nrow(pas))
+}
 
 #the average parc size is 12933.13 [hectare] (but this is with big parks in the north)
 set_units(st_area(pas), "hectare") %>% mean()
@@ -77,12 +74,13 @@ set_units(st_area(pas), "hectare") %>% median()
 # --> for 9x9km, will need to find another solution, like downscaling GAEZ and then accommodate by spatial clustering s.e. at GAEZ or more res. 
 # --> for 1x1km, we can remove smallest parks from study. 
 
-sf_poly <- pas[1,]
-inpark_unit_size <- 8100
+sf_poly <- pas[9,]
+inpark_unit_size <- 100
+
 
 make_units <- function(sf_poly, inpark_unit_size){
   
-  sf_poly <- sf_poly %>% dplyr::select(contains("WDPAID"))
+  sf_poly <- sf_poly %>% dplyr::select(contains("RMSCID"))
   
   # In this case, the out-park area is the same as the in-parc one, there is no disc. 
   # intuitively: imagine two squares of the same area, one in the park one outside, and they share one of their sides, on the park bord.  
@@ -124,7 +122,7 @@ make_units <- function(sf_poly, inpark_unit_size){
       inpark_sf %>% 
       rename(INPARK_UNIT_ID = id) %>% 
       mutate(AREA_M2 = st_area(geometry), 
-             UNIT_ID = paste0(WDPAID, "-", INPARK_UNIT_ID),
+             UNIT_ID = paste0(RMSCID, "-", INPARK_UNIT_ID),
              IN_OR_OUT = "INPARK")
     
     # OUT-PARK Ppolygons
@@ -141,7 +139,7 @@ make_units <- function(sf_poly, inpark_unit_size){
       outpark_sf %>% 
       rename(INPARK_UNIT_ID = id) %>% 
       mutate(AREA_M2 = st_area(geometry), 
-             UNIT_ID = paste0(WDPAID, "-", INPARK_UNIT_ID),
+             UNIT_ID = paste0(RMSCID, "-", INPARK_UNIT_ID),
              IN_OR_OUT = "OUTPARK")
       
     
@@ -212,38 +210,52 @@ make_units <- function(sf_poly, inpark_unit_size){
   
   return(in_out_sf)
 }
+rm(sf_poly, inpark_unit_size)
 
 collect_list_SCHROTH_scale <- list()
 collect_list_GAEZ_scale <- list()
 
-for(PA in unique(pas$WDPAID)[1:10]){
-  collect_list_SCHROTH_scale[[as.character(PA)]] <- make_units(sf_poly = pas[pas$WDPAID == PA,], 
+for(PA in unique(pas$RMSCID)){
+  collect_list_SCHROTH_scale[[as.character(PA)]] <- make_units(sf_poly = pas[pas$RMSCID == PA,], 
                                                  inpark_unit_size = 100)
-  print(match(PA, unique(pas$WDPAID)))# print progress
+  print(match(PA, unique(pas$RMSCID)))# print progress
 }
 
-for(PA in unique(pas$WDPAID)){
-  collect_list_GAEZ_scale[[as.character(PA)]] <- make_units(sf_poly = pas[pas$WDPAID == PA,], 
+output_sf_schroth <- bind_rows(collect_list_SCHROTH_scale)  
+row.names(output_sf_schroth) <- NULL
+
+plot(output_sf_schroth[,"IN_OR_OUT"])
+
+for(PA in unique(pas$RMSCID)){
+  collect_list_GAEZ_scale[[as.character(PA)]] <- make_units(sf_poly = pas[pas$RMSCID == PA,], 
                                                  inpark_unit_size = 8100)
-  print(match(PA, unique(pas$WDPAID)))# print progress
+  print(match(PA, unique(pas$RMSCID)))# print progress
 }
 
 output_sf_gaez <- bind_rows(collect_list_GAEZ_scale)  
 row.names(output_sf_gaez) <- NULL
 
-length(unique(output_sf_gaez$WDPAID)) # 102 parks
+length(unique(output_sf_gaez$RMSCID)) # 102 parks
 
-length(unique(output_sf_gaez$UNIT_ID))*2 == nrow(output_sf_gaez)
 
 plot(output_sf_gaez[,"IN_OR_OUT"])
 
-inpark_sf_9km <- output_sf_gaez %>% filter(IN_OR_OUT == "INPARK")
-outpark_sf_9km <- output_sf_gaez %>% filter(IN_OR_OUT == "OUTPARK")
+# some checks 
+if(!(length(unique(output_sf_gaez$UNIT_ID))*2 == nrow(output_sf_gaez))){
+  stop("something unexepected happened")
+}
+
+### EXPORT #### 
+# SCHROTH SCALE 
+inpark_sf_1km <- output_sf_schroth %>% filter(IN_OR_OUT == "INPARK")
+outpark_sf_1km <- output_sf_schroth %>% filter(IN_OR_OUT == "OUTPARK")
 
 # Export as geojson
+st_write(inpark_sf_1km, "temp_data/rmsc_inpark_1km", driver = "GeoJSON")
+
 s3write_using(
-  x = inpark_sf_9km,
-  object = paste0("ghana/cocoa/displacement_econometrics/inpark_9km"),
+  x = inpark_sf_1km,
+  object = paste0("ghana/cocoa/displacement_econometrics/rmsc_inpark_1km"),
   FUN = st_write,
   driver = "GeoJSON",
   bucket = "trase-storage",
@@ -252,9 +264,41 @@ s3write_using(
 
 
 # Export as geojson
+st_write(outpark_sf_1km, "temp_data/rmsc_outpark_1km", driver = "GeoJSON")
+
+s3write_using(
+  x = outpark_sf_1km,
+  object = paste0("ghana/cocoa/displacement_econometrics/rmsc_outpark_1km"),
+  FUN = st_write,
+  driver = "GeoJSON",
+  bucket = "trase-storage",
+  opts = c("check_region" = T)
+)
+
+# GAEZ SCALE 
+inpark_sf_9km <- output_sf_gaez %>% filter(IN_OR_OUT == "INPARK")
+outpark_sf_9km <- output_sf_gaez %>% filter(IN_OR_OUT == "OUTPARK")
+
+
+# Export as geojson
+st_write(inpark_sf_9km, "temp_data/rmsc_inpark_9km", driver = "GeoJSON")
+
+s3write_using(
+  x = inpark_sf_9km,
+  object = paste0("ghana/cocoa/displacement_econometrics/rmsc_inpark_9km"),
+  FUN = st_write,
+  driver = "GeoJSON",
+  bucket = "trase-storage",
+  opts = c("check_region" = T)
+)
+
+
+# Export as geojson
+st_write(outpark_sf_9km, "temp_data/rmsc_outpark_9km", driver = "GeoJSON")
+
 s3write_using(
   x = outpark_sf_9km,
-  object = paste0("ghana/cocoa/displacement_econometrics/outpark_9km"),
+  object = paste0("ghana/cocoa/displacement_econometrics/rmsc_outpark_9km"),
   FUN = st_write,
   driver = "GeoJSON",
   bucket = "trase-storage",
