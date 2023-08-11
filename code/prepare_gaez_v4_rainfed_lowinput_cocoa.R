@@ -25,16 +25,7 @@ Sys.setenv("AWS_DEFAULT_REGION" = "eu-west-1")
 # Download for these crops: maize, cassava, plantain, yam, cocoyam, rice, sorghum and millet
 
 # Renaming layers with the following name mapping matrix
-mapmat_data <- c("csv", "Cassava", 
-                 "ban", "Banana", # captures plantain according to gaez doc. 
-                 "mlt", "Millet",
-                 "mze", "Maizegrain",
-                 "pml", "Pearlmillet" ,
-                 "fml", "Foxtailmillet", 
-                 "rcd", "Drylandrice",
-                 "rcw", "Wetlandrice" ,
-                 "srg", "Sorghum",
-                 "yam", "Yam")
+mapmat_data <- c("coc", "Cocoa")
 
 # 3 of these are not in the data downloaded (but that does matter): Millet, Maizesilage, and Pasture
 mapmat <- matrix(data = mapmat_data, 
@@ -47,10 +38,11 @@ colnames(mapmat) <- c("abrev", "Names")
 
 ### ### ### ### ### ### ### ### ### ### ### ### ### ### ### ### ### ### ### ### ### ### ### ### ### ### ### ### ### ### ### ### 
 #### PREPARE SUITABILITY INDICES ####
-dir.create(here("temp_data", "GAEZ_v4", "AES_index_value", "Rain-fed", "Low-input", "Staples"), recursive = TRUE) 
 
-datadir <- here("input_data", "GAEZ_v4", "AES_index_value", "Rain-fed", "Low-input", "Staples")
-targetdir <- here("temp_data", "GAEZ_v4", "AES_index_value", "Rain-fed", "Low-input", "Staples")
+dir.create(here("temp_data", "GAEZ_v4", "AES_index_value", "Rain-fed", "Low-input", "Cocoa"), recursive = TRUE) 
+
+datadir <- here("input_data", "GAEZ_v4", "AES_index_value", "Rain-fed", "Low-input", "Cocoa")
+targetdir <- here("temp_data", "GAEZ_v4", "AES_index_value", "Rain-fed", "Low-input", "Cocoa")
 tmpdir <- here("temp_data", "tmp")
 
 if (!dir.exists(tmpdir)) dir.create(tmpdir, recursive = TRUE)
@@ -90,52 +82,32 @@ for (j in 1:length(files)) {
 }
 rm(dt, dt_trop)
 
-## Create a brick for convenience. 
-rasterlist_gaez <- list.files(path = targetdir, 
-                              pattern = "", 
+## Create a brick for convenience. (actually not necessary, but need to read the layer anyway)
+rasterlist_gaez <- list.files(path = targetdir,
+                              pattern = "",
                               full.names = TRUE) %>% as.list()
-gaez_all <- brick(rasterlist_gaez)
+gaez_cocoa <- brick(rasterlist_gaez)
 
 # project to PAS CRS. 
 
-gaez_all <- projectRaster(gaez_all, crs = 32630)
-
-gaez_max <- overlay(gaez_all, fun = max, na.rm = TRUE)
-gaez_avg <- overlay(gaez_all, fun = mean, na.rm = TRUE)
-
-raster::values(gaez_all) %>% max(na.rm = T)
-raster::values(gaez_max) %>% max(na.rm = T)
-raster::values(gaez_all) %>% mean(na.rm = T)
-raster::values(gaez_avg) %>% mean(na.rm = T)
-
-plot(gaez_max)
+gaez_cocoa <- projectRaster(gaez_cocoa, crs = 32630)
+plot(gaez_cocoa)
 pas <- read_sf("input_data/WDPA_PROTECTED_AREAS_GHA_AUG21.gpkg")
 plot(st_geometry(pas), add = T)
 
-writeRaster(gaez_max, 
-            here("temp_data", "GAEZ_v4", "AES_index_value", "Rain-fed", "Low-input", "Staples", "ghana_staples_max.tif"), 
+writeRaster(gaez_cocoa, 
+            here("temp_data", "GAEZ_v4", "AES_index_value", "Rain-fed", "Low-input", "Cocoa", "ghana_cocoa.tif"), 
             overwrite = TRUE)
 
-writeRaster(gaez_avg, 
-            here("temp_data", "GAEZ_v4", "AES_index_value", "Rain-fed", "Low-input", "Staples", "ghana_staples_avg.tif"), 
-            overwrite = TRUE)
 
 s3write_using(
-  x = gaez_max,
-  object = "ghana/cocoa/displacement_econometrics/temp_data/GAEZ_v4/AES_index_value/Rain-fed/Low-input/Staples/ghana_staples_max.tif",
+  x = gaez_cocoa,
+  object = "ghana/cocoa/displacement_econometrics/temp_data/GAEZ_v4/AES_index_value/Rain-fed/Low-input/Cocoa/ghana_cocoa.tif",
   FUN = writeRaster,
   bucket = "trase-storage",
   opts = c("check_region" = T)
 )
 
-s3write_using(
-  x = gaez_avg,
-  object = "ghana/cocoa/displacement_econometrics/temp_data/GAEZ_v4/AES_index_value/Rain-fed/Low-input/Staples/ghana_staples_avg.tif",
-  FUN = writeRaster,
-  bucket = "trase-storage",
-  opts = c("check_region" = T)
-)
-
-rm(rasterlist_gaez, gaez_all, gaez_max, gaez_avg)
+rm(rasterlist_gaez, gaez_cocoa)
 
 rm(ext, mapmat, mapmat_data)
