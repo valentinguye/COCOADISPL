@@ -120,10 +120,10 @@ make_units <- function(sf_poly, inpark_unit_size){
     
     inpark_sf <- 
       inpark_sf %>% 
-      rename(INPARK_UNIT_ID = id) %>% 
-      mutate(AREA_M2 = st_area(geometry), 
-             UNIT_ID = paste0(RMSCID, "-", INPARK_UNIT_ID),
-             IN_OR_OUT = "INPARK")
+      rename(INPARK_ID = id) %>% 
+      mutate(AREA_HA = set_units(st_area(geometry), "hectares"), 
+             UNIT_ID = paste0(RMSCID, "-", INPARK_ID),
+             IN_OUT = "INPARK")
     
     # OUT-PARK Ppolygons
     outpark_sf <- 
@@ -137,27 +137,27 @@ make_units <- function(sf_poly, inpark_unit_size){
     
     outpark_sf <- 
       outpark_sf %>% 
-      rename(INPARK_UNIT_ID = id) %>% 
-      mutate(AREA_M2 = st_area(geometry), 
-             UNIT_ID = paste0(RMSCID, "-", INPARK_UNIT_ID),
-             IN_OR_OUT = "OUTPARK")
+      rename(INPARK_ID = id) %>% 
+      mutate(AREA_HA = set_units(st_area(geometry), "hectares"), 
+             UNIT_ID = paste0(RMSCID, "-", INPARK_ID),
+             IN_OUT = "OUTPARK")
       
     
-    mean(set_units(outpark_sf$AREA_M2, "hectare"))
+    mean(set_units(outpark_sf$AREA_HA, "hectare"))
     
     # Keep only in-park polygons that have a matching treatment polygon outside
     inpark_sf <- 
       inpark_sf %>% 
-      filter(INPARK_UNIT_ID %in% outpark_sf$INPARK_UNIT_ID)
+      filter(INPARK_ID %in% outpark_sf$INPARK_ID)
     
     plot(st_geometry(sf_poly))
     plot(st_geometry(inpark_sf), add = T)
-    plot(outpark_sf[,"INPARK_UNIT_ID"], add = T)
+    plot(outpark_sf[,"INPARK_ID"], add = T)
      
     # # Check that in and out polygons have the same ID
     # plot(st_geometry(sf_poly))
-    # plot(st_geometry(inpark_sf[1,"INPARK_UNIT_ID"]), add = T)
-    # plot(outpark_sf[outpark_sf$INPARK_UNIT_ID==inpark_sf[1,]$INPARK_UNIT_ID, "INPARK_UNIT_ID"], add = T)
+    # plot(st_geometry(inpark_sf[1,"INPARK_ID"]), add = T)
+    # plot(outpark_sf[outpark_sf$INPARK_ID==inpark_sf[1,]$INPARK_ID, "INPARK_ID"], add = T)
     
     # stack in- and out-park polygons
     
@@ -181,8 +181,8 @@ make_units <- function(sf_poly, inpark_unit_size){
   # 
   # # edges2 <- edges %>% filter(st_geometry_type(geometry) == "MULTILINESTRING") %>% st_line_merge()
   # 
-  # # equal_area_55 <-  equal_areas %>% filter(INPARK_UNIT_ID==19)
-  # # edge_55 <- edges %>% filter(INPARK_UNIT_ID==19)
+  # # equal_area_55 <-  equal_areas %>% filter(INPARK_ID==19)
+  # # edge_55 <- edges %>% filter(INPARK_ID==19)
   # # plot(st_geometry(equal_area_55))
   # # plot(st_geometry(edge_55), add = T, col = "red")
   # 
@@ -212,9 +212,9 @@ make_units <- function(sf_poly, inpark_unit_size){
 }
 rm(sf_poly, inpark_unit_size)
 
-collect_list_SCHROTH_scale <- list()
-collect_list_GAEZ_scale <- list()
 
+# RUN SCHROTH SCALE
+collect_list_SCHROTH_scale <- list()
 for(PA in unique(pas$RMSCID)){
   collect_list_SCHROTH_scale[[as.character(PA)]] <- make_units(sf_poly = pas[pas$RMSCID == PA,], 
                                                  inpark_unit_size = 100)
@@ -224,8 +224,11 @@ for(PA in unique(pas$RMSCID)){
 output_sf_schroth <- bind_rows(collect_list_SCHROTH_scale)  
 row.names(output_sf_schroth) <- NULL
 
-plot(output_sf_schroth[,"IN_OR_OUT"])
+plot(output_sf_schroth[,"IN_OUT"])
 
+
+# RUN GAEZ SCALE
+collect_list_GAEZ_scale <- list()
 for(PA in unique(pas$RMSCID)){
   collect_list_GAEZ_scale[[as.character(PA)]] <- make_units(sf_poly = pas[pas$RMSCID == PA,], 
                                                  inpark_unit_size = 8100)
@@ -235,10 +238,10 @@ for(PA in unique(pas$RMSCID)){
 output_sf_gaez <- bind_rows(collect_list_GAEZ_scale)  
 row.names(output_sf_gaez) <- NULL
 
-length(unique(output_sf_gaez$RMSCID)) # 102 parks
+length(unique(output_sf_gaez$RMSCID)) # 92 parks
 
 
-plot(output_sf_gaez[,"IN_OR_OUT"])
+plot(output_sf_gaez[,"IN_OUT"])
 
 # some checks 
 if(!(length(unique(output_sf_gaez$UNIT_ID))*2 == nrow(output_sf_gaez))){
@@ -246,64 +249,71 @@ if(!(length(unique(output_sf_gaez$UNIT_ID))*2 == nrow(output_sf_gaez))){
 }
 
 ### EXPORT #### 
+# Save files locally and manually upload them in s3, because it's the only way to 
+# save ESRI shapefiles in s3, and Cécile needs this format in GEE. 
+
 # SCHROTH SCALE 
-inpark_sf_1km <- output_sf_schroth %>% filter(IN_OR_OUT == "INPARK")
-outpark_sf_1km <- output_sf_schroth %>% filter(IN_OR_OUT == "OUTPARK")
+inpark_sf_1km <- output_sf_schroth %>% filter(IN_OUT == "INPARK")
+outpark_sf_1km <- output_sf_schroth %>% filter(IN_OUT == "OUTPARK")
 
 # Export as geojson
-st_write(inpark_sf_1km, "temp_data/rmsc_inpark_1km", driver = "GeoJSON")
+dir.create("temp_data/rmsc_inpark_1km/")
+st_write(inpark_sf_1km, "temp_data/rmsc_inpark_1km/rmsc_inpark_1km.shp", append = FALSE)
 
-s3write_using(
-  x = inpark_sf_1km,
-  object = paste0("ghana/cocoa/displacement_econometrics/rmsc_inpark_1km"),
-  FUN = st_write,
-  driver = "GeoJSON",
-  bucket = "trase-storage",
-  opts = c("check_region" = T)
-)
+# s3write_using(
+#   x = inpark_sf_1km,
+#   object = paste0("ghana/cocoa/displacement_econometrics/rmsc_inpark_1km"),
+#   FUN = st_write,
+#   driver = "GeoJSON",
+#   bucket = "trase-storage",
+#   opts = c("check_region" = T)
+# )
 
 
 # Export as geojson
-st_write(outpark_sf_1km, "temp_data/rmsc_outpark_1km", driver = "GeoJSON")
+dir.create("temp_data/rmsc_outpark_1km/")
+st_write(outpark_sf_1km, "temp_data/rmsc_outpark_1km/rmsc_outpark_1km.shp", append = FALSE)
 
-s3write_using(
-  x = outpark_sf_1km,
-  object = paste0("ghana/cocoa/displacement_econometrics/rmsc_outpark_1km"),
-  FUN = st_write,
-  driver = "GeoJSON",
-  bucket = "trase-storage",
-  opts = c("check_region" = T)
-)
+# s3write_using(
+#   x = outpark_sf_1km,
+#   object = paste0("ghana/cocoa/displacement_econometrics/rmsc_outpark_1km"),
+#   FUN = st_write,
+#   driver = "GeoJSON",
+#   bucket = "trase-storage",
+#   opts = c("check_region" = T)
+# )
 
 # GAEZ SCALE 
-inpark_sf_9km <- output_sf_gaez %>% filter(IN_OR_OUT == "INPARK")
-outpark_sf_9km <- output_sf_gaez %>% filter(IN_OR_OUT == "OUTPARK")
-
-
-# Export as geojson
-st_write(inpark_sf_9km, "temp_data/rmsc_inpark_9km", driver = "GeoJSON")
-
-s3write_using(
-  x = inpark_sf_9km,
-  object = paste0("ghana/cocoa/displacement_econometrics/rmsc_inpark_9km"),
-  FUN = st_write,
-  driver = "GeoJSON",
-  bucket = "trase-storage",
-  opts = c("check_region" = T)
-)
-
+inpark_sf_9km <- output_sf_gaez %>% filter(IN_OUT == "INPARK")
+outpark_sf_9km <- output_sf_gaez %>% filter(IN_OUT == "OUTPARK")
 
 # Export as geojson
-st_write(outpark_sf_9km, "temp_data/rmsc_outpark_9km", driver = "GeoJSON")
+dir.create("temp_data/rmsc_inpark_9km/")
+st_write(inpark_sf_9km, "temp_data/rmsc_inpark_9km/rmsc_inpark_9km.shp", append = FALSE) # driver = "ESRI Shapefile",
 
-s3write_using(
-  x = outpark_sf_9km,
-  object = paste0("ghana/cocoa/displacement_econometrics/rmsc_outpark_9km"),
-  FUN = st_write,
-  driver = "GeoJSON",
-  bucket = "trase-storage",
-  opts = c("check_region" = T)
-)
+# s3write_using(
+#   x = inpark_sf_9km,
+#   object = paste0("ghana/cocoa/displacement_econometrics/rmsc_inpark_9km.shp"),
+#   FUN = st_write,
+#   append = FALSE,
+#   driver = "ESRI Shapefile",
+#   bucket = "trase-storage",
+#   opts = c("check_region" = T)
+# )
+
+# Export as geojson
+dir.create("temp_data/rmsc_outpark_9km/")
+st_write(outpark_sf_9km, "temp_data/rmsc_outpark_9km/rmsc_outpark_9km.shp", driver = "ESRI Shapefile", append = FALSE)
+
+# s3write_using(
+#   x = outpark_sf_9km,
+#   object = paste0("ghana/cocoa/displacement_econometrics/rmsc_outpark_9km.shp"),
+#   FUN = st_write,
+#   append = FALSE,
+#   driver = "ESRI Shapefile",
+#   bucket = "trase-storage",
+#   opts = c("check_region" = T)
+# )
 
 
 
@@ -324,14 +334,14 @@ plot(st_geometry(edges_disc), add = T, col = "blue")
 plot(st_geometry(sf_poly))
 plot(st_geometry(disc_centro), add = T, col = "red")
 plot(st_geometry(equal_areas), add = T)
-plot(tmt_disc[,"INPARK_UNIT_ID"], add = T)
+plot(tmt_disc[,"INPARK_ID"], add = T)
 
 
 
 ggplot(data = equal_areas) + 
   geom_sf() +
   geom_sf_text(
-    aes(label = INPARK_UNIT_ID), data = equal_areas,
+    aes(label = INPARK_ID), data = equal_areas,
   )
 
 
