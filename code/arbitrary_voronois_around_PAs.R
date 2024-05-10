@@ -25,6 +25,7 @@ pas <- s3read_using(
   bucket = "trase-storage",
   opts = c("check_region" = T))
 
+
 # WDPA
 # pas <- s3read_using(
 #   object = "ghana/spatial/BOUNDARIES/PROTECTED_AREAS/WDPA/OUT/WDPA_PROTECTED_AREAS_GHA_AUG21.gpkg",
@@ -74,7 +75,8 @@ set_units(st_area(pas), "hectare") %>% median()
 # --> for 9x9km, will need to find another solution, like downscaling GAEZ and then accommodate by spatial clustering s.e. at GAEZ or more res. 
 # --> for 1x1km, we can remove smallest parks from study. 
 
-sf_poly <- pas[9,]
+sf_poly <- pas[99,]
+plot(st_geometry(sf_poly))
 inpark_unit_size <- 100
 
 
@@ -150,9 +152,23 @@ make_units <- function(sf_poly, inpark_unit_size){
       inpark_sf %>% 
       filter(INPARK_ID %in% outpark_sf$INPARK_ID)
     
+    # ggplot(sf_poly) + 
+    #   geom_sf(fill = "white") +
+    #   theme_minimal()
+    # 
+    # ggplot(inpark_sf) + 
+    #   geom_sf(fill = "white") + 
+    #   theme_minimal()
+    # 
+    # ggplot(outpark_sf) + 
+    #   geom_sf(aes(fill = UNIT_ID)) +
+    #   geom_sf(data = st_geometry(sf_poly), aes(fill = NA)) +
+    #   geom_sf(data = st_geometry(inpark_sf), aes(), fill = "white") + 
+    #   theme_minimal()
+    
     plot(st_geometry(sf_poly))
     plot(st_geometry(inpark_sf), add = T)
-    plot(outpark_sf[,"INPARK_ID"], add = T)
+    plot(outpark_sf[,"INPARK_ID"], add = T) 
      
     # # Check that in and out polygons have the same ID
     # plot(st_geometry(sf_poly))
