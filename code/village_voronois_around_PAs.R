@@ -10,9 +10,17 @@ library(DescTools)
 aws.signature::use_credentials()
 Sys.setenv("AWS_DEFAULT_REGION" = "eu-west-1")
 
-sur_dist <-
+sur_vil <-
   s3read_using(
     object = "ghana/cocoa/displacement_econometrics/input_data/surveys_thomas/Village list with distance_Ghana.csv", 
+    bucket = "trase-storage",
+    FUN = read.csv,
+    opts = c("check_region" = TRUE)
+  )
+# Updated (the above has villages that were actually not surveyed)
+sur_vil <-
+  s3read_using(
+    object = "ghana/cocoa/displacement_econometrics/input_data/surveys_thomas/Updated list of villages_Ghana survey.csv", 
     bucket = "trase-storage",
     FUN = read.csv,
     opts = c("check_region" = TRUE)
@@ -20,6 +28,14 @@ sur_dist <-
 
 # All villages
 #... 
+all_vil <-
+  s3read_using(
+    object = "ghana/cocoa/displacement_econometrics/input_data/surveys_thomas/Deforestation analysis villages_Ghana.csv", 
+    bucket = "trase-storage",
+    FUN = read.csv,
+    opts = c("check_region" = TRUE)
+  ) %>% 
+  mutate(SURVEYED = if_else(surveyed...1.Yes..0.No. == 1, TRUE, FALSE))
 
 # RMSC
 pas <- s3read_using(
@@ -54,27 +70,27 @@ set_units(st_area(pas), "hectare") %>% median()
 
 
 # Spatialize villages 
-sur_sf <- 
-  sur_dist %>% 
+all_vil <- 
+  all_vil %>% 
   st_as_sf(coords = c("POINT_X", "POINT_Y"), crs = 4326) %>%  
   st_transform(crs = st_crs(pas))
 
-ggplot(st_crop(pas, st_bbox(st_buffer(sur_sf, 10000)))) + 
-  geom_sf() + 
-  geom_sf_text(aes(label = RMSCID), geometry = geom, size = 3) +
-  geom_sf(data = sur_sf) + 
+ggplot(st_crop(pas, st_bbox(st_buffer(all_vil, 10000)))) + 
+  geom_sf() +  
+  geom_sf_text(aes(label = RMSCID), size = 3) + # , geometry = geom
+  geom_sf(data = all_vil) + 
   theme_minimal() 
 
 # restrict to park area within 10km of the farther villages for now, and unionize them.  
-parks_poly <- st_union(st_crop(pas, st_bbox(st_buffer(sur_sf, 10000)))) %>% st_sf()
+parks_poly <- st_union(st_crop(pas, st_bbox(st_buffer(all_vil, 10000)))) %>% st_sf()
 # remove villages in parks for now. 
-vill_points <- sur_sf %>% filter(lengths(st_within(sur_sf, st_union(pas))) == 0)
-
+# all_vil <- all_vil %>% filter(lengths(st_within(all_vil, st_union(pas))) == 0)
 ggplot(parks_poly) + 
   geom_sf() + 
-  geom_sf(data = vill_points) + 
+  geom_sf(data = all_vil) + 
   theme_minimal() 
 
+vill_points <- all_vil
 make_units <- function(parks_poly, vill_points){
   
 # Here, we do not set an in-park unit size (that would match the resolution of Schroth or gaez)
@@ -128,17 +144,18 @@ make_units <- function(parks_poly, vill_points){
   mean(set_units(outpark_sf$AREA_HA, "hectare"))
   
   # Keep only in-park polygons that have a matching treatment polygon outside
-  inpark_sf <- 
-    inpark_sf %>% 
-    filter(INPARK_ID %in% outpark_sf$INPARK_ID)
+  # inpark_sf <- 
+  #   inpark_sf %>% 
+  #   filter(INPARK_ID %in% outpark_sf$INPARK_ID)
   
   ggplot() + 
     theme_minimal() +
     geom_sf(data = parks_poly) +
-    geom_sf(data = vill_points) +
+    geom_sf(data = vill_points, aes(col = SURVEYED)) +
     geom_sf(data = voronoi_sf, alpha = 0) +
+    scale_color_discrete(guide = guide_legend(title = "Surveyed")) + 
     geom_sf(data = inpark_sf, fill = "green", alpha = 0.5) + 
-    geom_sf(data = outpark_sf, fill = "grey", alpha = 0.5) + 
+    geom_sf(data = outpark_sf, fill = "grey", alpha = 0.5) 
   
   
   # ggplot(parks_poly) + 
