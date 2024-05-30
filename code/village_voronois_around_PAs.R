@@ -1,3 +1,6 @@
+
+
+
 library(tidyverse)
 library(aws.s3)
 library(sf)
@@ -10,14 +13,17 @@ library(DescTools)
 aws.signature::use_credentials()
 Sys.setenv("AWS_DEFAULT_REGION" = "eu-west-1")
 
-sur_vil <-
+
+# This has villages that were actually not surveyed
+sur_vil_dist <-
   s3read_using(
     object = "ghana/cocoa/displacement_econometrics/input_data/surveys_thomas/Village list with distance_Ghana.csv", 
     bucket = "trase-storage",
     FUN = read.csv,
     opts = c("check_region" = TRUE)
   )
-# Updated (the above has villages that were actually not surveyed)
+
+# Updated - this has the correct list of villages. 
 sur_vil <-
   s3read_using(
     object = "ghana/cocoa/displacement_econometrics/input_data/surveys_thomas/Updated list of villages_Ghana survey.csv", 
@@ -81,38 +87,79 @@ ggplot(st_crop(pas, st_bbox(st_buffer(all_vil, 10000)))) +
   geom_sf(data = all_vil) + 
   theme_minimal() 
 
-# restrict to park area within 10km of the farther villages for now, and unionize them.  
+# restrict the AOI to a square including any park area within 10km from any village for now
+# (2km is the buffer depth Thomas chose to sample villages)
 parks_poly <- st_union(st_crop(pas, st_bbox(st_buffer(all_vil, 10000)))) %>% st_sf()
-# remove villages in parks for now. 
+# DON'T remove villages in parks for now. 
 # all_vil <- all_vil %>% filter(lengths(st_within(all_vil, st_union(pas))) == 0)
+vill_points <- all_vil
+
 ggplot(parks_poly) + 
   geom_sf() + 
-  geom_sf(data = all_vil) + 
+  geom_sf(data = vill_points) + 
   theme_minimal() 
 
-vill_points <- all_vil
 make_units <- function(parks_poly, vill_points){
   
 # Here, we do not set an in-park unit size (that would match the resolution of Schroth or gaez)
 # rather, the size of the polygons in-parks are determined by the number of villages around. 
+# Problem: we currently don't observe all villages. 
+# So we limit the polygon of every village in the opposite direction of the park, with a buffer. 
+# So we make a unionized buffer around villages of size M km
+# The size of the buffer is determined arbitrarily to 6km 
 
-  # The buffer depth is the one Thomas chose to sample villages, it's 2km. 
-  OUT_BUFFER_SIZE <- 2000
+# (Recall the average distance of households to their farms is ~2.7 km 
+# sur_vil_dist$mean_distance %>% mean(na.rm = T)
+  buf_vil <-
+    vill_points %>%
+    st_buffer(9000) %>%
+    st_union() %>% 
+    st_as_sf()
   
-  # make a buffer around the park 
-  out_buffer <- st_buffer(parks_poly, OUT_BUFFER_SIZE) %>% dplyr::select(-1) # (remove the park ID from this object, it's redundant)
-  
+  # make a buffer around the park, use the buffer depth Thomas chose to sample villages: 2km
+  # OUT_BUFFER_SIZE <- 2000
+  # out_buffer <- st_buffer(parks_poly, OUT_BUFFER_SIZE) %>% dplyr::select(-1) # (remove the park ID from this object, it's redundant)
   
   # create voronoi polygons
-  voronoi_polys <- dismo::voronoi(st_coordinates(vill_points), ext = out_buffer)#out_buffer
+  voronoi_polys <- dismo::voronoi(st_coordinates(vill_points), ext = parks_poly)#buf_vil out_buffer
   voronoi_sf <- st_as_sf(voronoi_polys)
   st_crs(voronoi_sf) <- st_crs(parks_poly)
-  voronoi_sf$intd_village <- vill_points$intd_village
+  # voronoi_sf$intd_village <- vill_points$ID
 
+  # need to associate back the voronois to their village ID, because it is not clear what the id var created by dismo::voronoi is
+  sgbp <- st_contains(voronoi_sf, vill_points)
+  if(nrow(vill_points) != nrow(voronoi_sf) | 
+     unique(lengths(sgbp)) != 1){stop("id process needs to be reconsidered")}
+  
+  voronoi_sf$ROW_INDEX <- unlist(sgbp)
+  vill_points$ROW_INDEX <- rownames(vill_points) %>% as.numeric()
+  voronoi_sf <- 
+    voronoi_sf %>% 
+    left_join(st_drop_geometry(vill_points), by = "ROW_INDEX")
+  
+  # trim voronoi polygons by an arbitrary buffer around parks 
+  voronoi_sf <- 
+    voronoi_sf %>% 
+    st_intersection(buf_vil)
+  
+  ggplot() + 
+    theme_minimal() +
+    geom_sf(data = parks_poly) +
+    geom_sf(data = vill_points, aes(col = SURVEYED)) +
+    geom_sf(data = voronoi_sf, alpha = 0) +
+    scale_color_discrete(guide = guide_legend(title = "Surveyed"))
+  
+  # Keep only surveyed villages, we don't need the others anymore 
+  sur_voronoi_sf <- 
+    voronoi_sf %>% 
+    filter(SURVEYED)
+  
+  # ON EN EST LA, GERER LA PRODUCTION D'ID
+  
   # IN-PARK polygons
   inpark_sf <- 
     voronoi_sf %>% 
-    # trim area outside the park
+    # trim area outside the park - this drops polygons that are fully outside the parks
     st_intersection(parks_poly)
   
   inpark_sf <- 
@@ -123,7 +170,7 @@ make_units <- function(parks_poly, vill_points){
            IN_OUT = "INPARK")
   
   
-  # OUT-PARK Ppolygons
+  # OUT-PARK Polygons
   outpark_sf <- 
     voronoi_sf %>% 
     # remove inner park (this drops features that are fully in the park) - so the ids
