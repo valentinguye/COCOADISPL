@@ -1,0 +1,149 @@
+/*
+Script description:
+  Ghana cocoa deforestation per district
+
+ 
+Assets description: 
+  cocoa_map: 
+  1/ ETH Zurich: 2019-2021 cocoa map for CIV & GHA
+      Produced by Kalischek et al 2022 (https://nk.users.earthengine.app/view/cocoa-map)
+  
+  Forest map:
+  1/ JRC-Tropical Moist Forest (TMF) version 2021
+      Collection of 31 maps with for each year between 1990 and 2020
+      ... the spatial extent of undisturbed forest and their changes (deforestation, degradation and regrowth), 
+      ... based on 30 m resolution Landsat images.
+      Produced by Vancutsem et al 2021 (https://forobs.jrc.ec.europa.eu/TMF/data.php)
+
+  
+  gh_districts: Ghana district boundaries
+  
+Result: 
+  1/ .CSV file with the cocoa deforestation area (total 2010-2017) in hectares for each department 
+  2/ .CSV file with the forest area in 2010 and 2017, in hectares for each department 
+  3/ Rasters of cocoa deforestation, recent deforestation (forest lost between 2010 and 2017), forest 2010 and forest 2017
+*/
+
+
+// --------------- Functions --------------- // 
+
+// Reduce class area and export by feature unit 
+/* Calculate total area in hectares per feature for all the features in a feature collection
+   The output needs to be a binary file, otherwise you are multiplying your area by the class
+   - setGeometry(null) is a important function for optimization, no to write useless info as geo descriptions
+*/
+var region_reducer = function region_reducer (image, select_region,scale) {
+  var area = ee.Image.pixelArea().divide(10000);
+  var pas = image.multiply(area).reduceRegions({
+            collection: select_region,
+            reducer: 'sum',
+            scale: scale
+  }); 
+  return pas.map(function (feature) {
+    var dict = ee.Dictionary(feature.get('histogram'));
+    feature = feature.set(dict).setGeometry(null);
+    return (feature)
+  }
+)};
+  
+
+// Table Export Function 
+var export_table = function export_table (table, description, folder, selectors) { 
+  var em = Export.table.toDrive({
+    collection: ee.FeatureCollection(table),
+    description: description,
+    folder: folder,
+    selectors: [selectors]
+});
+  return em
+};
+
+
+var AOI_projection = ee.Projection("EPSG:2136");
+print(AOI_projection)
+
+var transformer = function(a_feature) {
+  var transformed_feature = a_feature.transform(AOI_projection, 0.001);
+  return transformed_feature;
+};
+
+
+// ---------------  LOAD boundaries Shapefiles --------------- // 
+
+// Load departments and transform projection
+var AOI = ee.FeatureCollection('USDOS/LSIB_SIMPLE/2017')
+                  .filter(ee.Filter.eq('country_na', "Ghana"));
+var AOI = AOI.map(transformer);
+Map.addLayer(AOI, {}, 'AOI_map', false);
+
+AOI
+
+// Load districts 
+
+var gh_districts = ee.FeatureCollection('users/valentinguye/ghana/gha_districts');
+var gh_districts = gh_districts.map(transformer);
+Map.addLayer(gh_districts, {}, 'gh_districts', false);
+
+
+// Load protected areas RMSC
+var gh_protected_areas = ee.FeatureCollection('projects/trase/STORAGE/GH/BOUNDARIES/gha_protected_areas_rmsc');
+var gh_protected_areas = gh_protected_areas.map(transformer);
+
+
+// --------------- Load COCOA maps --------------- // 
+
+// --------------- ETH (final version May 2022)
+// 0 = non cocoa & 1 = cocoa
+var cocoa_map_eth = ee.Image('projects/ee-nk-cocoa/assets/cocoa_map_threshold_065').unmask().clip(AOI).reproject(AOI_projection,null,10);
+Map.addLayer(cocoa_map_eth,{min:0,max:1},'cocoa_map_eth', false);
+
+// --------------- Load FOREST maps --------------- // 
+
+// --------------- JRC-TMF
+// Load TMF Annual change collection with the 30 bands 
+// ... corresponding to each year between year 1990 and year 2020
+var AnnualChanges = ee.ImageCollection('projects/JRC/TMF/v1_2021/AnnualChanges')
+                    .mosaic().clip(AOI).reproject(AOI_projection,null,30);
+
+// Map.addLayer(AnnualChanges,{}, "JRC - Annual Changes - 1990-2020 - v1 2021", false);
+
+// Load 2010 Undisturbed TMF
+// Select only class 1 of the year 2010 corresponding to *Undisturbed* tropical moist forest
+var AnnualChanges2010 = AnnualChanges.select('Dec2010');
+//Map.addLayer(AnnualChanges2010.updateMask(AnnualChanges2010),{'min':1, 'max': 6, 'palette': PALETTEAnnualChanges}, "JRC - Annual Changes - year 2010 - v1 2021",false);
+var tmf_forest2010 = AnnualChanges2010.eq(1).unmask().resample("bicubic").reproject(cocoa_map_eth.projection()); // reprojecting the forest to be 10m and UTM EPSG 2041
+Map.addLayer(tmf_forest2010,{'min':0, 'max': 1}, "Undisturbed TMF 2010",false);
+
+// Load 2017 Undisturbed TMF
+var AnnualChanges2017 = AnnualChanges.select('Dec2017');
+//Map.addLayer(AnnualChanges2017.updateMask(AnnualChanges2017),{'min':1, 'max': 6, 'palette': PALETTEAnnualChanges}, "JRC - Annual Changes - year 2017 - v1 2017",false);
+var tmf_forest2017 = AnnualChanges2017.eq(1).unmask().resample("bicubic").reproject(cocoa_map_eth.projection()); // reprojecting the forest to be 10m and UTM EPSG 2041
+Map.addLayer(tmf_forest2017,{'min':0, 'max': 1}, "Undisturbed TMF 2017",false);
+
+// Recent deforestation 
+var recent_deforestation = tmf_forest2010.neq(tmf_forest2017.eq(1)).reduce(ee.Reducer.max()); 
+
+
+// --------------- Cocoa deforestation --------------- // 
+// Create the cocoa deforestation raster by overlaying forest lost between 2010-2017 with cocoa 
+var cocoa_deforestation = cocoa_map_eth.and(recent_deforestation.eq(1));
+
+// Display maps
+Map.addLayer(recent_deforestation, {min:0,max:1}, 'recent_deforestation', false);
+Map.addLayer(cocoa_deforestation, {min:0,max:1}, 'cocoa_deforestation', false);
+Map.addLayer(cocoa_map_eth, {min:0,max:1}, 'cocoa_map', false);
+
+
+// Export CSV file to your GDrive 
+export_table(region_reducer(cocoa_deforestation, gh_districts),
+                'past_cocoa_deforestation_total_2010_2017',
+                'Cocoa');
+
+export_table(region_reducer(tmf_forest2010, gh_districts),
+                'tmf_forest2010',
+                'Cocoa');
+
+export_table(region_reducer(tmf_forest2017, gh_districts),
+                'tmf_forest2017',
+                'Cocoa');
+

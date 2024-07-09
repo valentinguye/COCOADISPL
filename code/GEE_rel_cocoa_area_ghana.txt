@@ -1,0 +1,134 @@
+/*
+Script description:
+  Ghana Cocoa Area per department and Relative Suitable cocoa area per department (used to produce the cocoa production map (script in R))
+  !! Need to select one of the cocoa map below to run the script
+  
+  Based on script for Renier C, Vandromme M, Meyfroidt P, Ribeiro V, Kalischek N, zu Ermgassen E K H J 2023. 
+  Transparency, traceability and deforestation in the Ivorian cocoa supply chain. Envir. Res. Let. doi:10.1088/1748-9326/acad8e
+
+  We want to calculate the relative suitable area under cocoa per geocode
+  ... This relative area is the total area under cocoa weighted by the suitability for growing cocoa in this area
+  ... We will calculate this by multiplying each pixel of cocoa cover by the cocoa suitability in % 
+  ... and then multiply these by pixel size and sum these up to get the total relative area per geocode
+  
+Assets description: 
+  1/ ETH Zurich: 2019-2021 cocoa map for CIV & GHA
+      Produced by Kalischek et al 2022 (https://nk.users.earthengine.app/view/cocoa-map)
+  
+  suitability: Map of the current suitability of West Africa to grow cocoa
+  ...Based on climatic data and information on the ecophysiology and agronomy of cocoa in West Africa, 
+  ...each pixel (resolution of 927.66 m) is assigned a continuous value between 0 and 100, 
+  ...ranging from not suitable to best suitable. 
+  Produced by Schroth et al 2016 Sci. Total Environ. (https://doi.org/10.7910/DVN/1JMXC6/QL9Y68)
+
+  districts: Ghana districts boundaries
+
+Result: 
+  .CSV file with the cocoa area in hectares for each department 
+  .CSV file with the relative suitable cocoa area in hectares for each department 
+*/
+
+
+// --------------- Functions --------------- //
+
+// Reduce class area and export by feature unit 
+/* Calculate total area in hectares per feature for all the features in a feature collection
+   The output needs to be a binary file, otherwise you are multiplying your area by the class
+   - setGeometry(null) is a important function for optimization, no to write useless info as geo descriptions
+*/
+var region_reducer = function region_reducer (image, select_region,scale) {
+  var area = ee.Image.pixelArea().divide(10000);
+  var pas = image.multiply(area).reduceRegions({
+            collection: select_region,
+            reducer: 'sum',
+            scale: scale
+  }); 
+  return pas.map(function (feature) {
+    var dict = ee.Dictionary(feature.get('histogram'));
+    feature = feature.set(dict).setGeometry(null);
+    return (feature)
+  }
+)};
+  
+
+// Table Export Function 
+var export_table = function export_table (table, description, folder, selectors) { 
+  var em = Export.table.toDrive({
+    collection: ee.FeatureCollection(table),
+    description: description,
+    folder: folder,
+    selectors: [selectors]
+});
+  return em
+};
+
+
+var AOI_projection = ee.Projection("EPSG:2041");
+print(AOI_projection)
+
+var transformer = function(a_feature) {
+  var transformed_feature = a_feature.transform(AOI_projection, 0.001);
+  return transformed_feature;
+};
+
+// ---------------  LOAD Shapefiles --------------- // 
+
+// Load departments and transform projection
+var departments = ee.FeatureCollection('users/valentinguye/ghana/gha_districts');
+var departments = departments.map(transformer);
+Map.addLayer(departments);
+
+// Load all GHA boundary and transform projection 
+var AOI = ee.FeatureCollection('USDOS/LSIB_SIMPLE/2017')
+                  .filter(ee.Filter.eq('country_na', "Ghana"));
+var AOI = AOI.map(transformer);
+Map.addLayer(AOI);
+
+// --------------- Load COCOA maps --------------- // 
+
+// --------------- 1 - ETH 
+// 0 = non cocoa & 1 = cocoa
+var cocoa_map_eth = ee.Image('users/valentinguye/cocoa_map_eth_threshold_065_final_may_2022').unmask().clip(AOI);
+
+Map.addLayer(cocoa_map_eth,{min:0,max:1},'cocoa_map_eth', false);
+
+var cocoa_map_eth = cocoa_map_eth.reproject(AOI_projection,null,10);
+
+// >>>>>>>>>> SELECT ONE of the cocoa maps to run the script <<<<<<<<<<<<<<<<<<
+var cocoa_map = cocoa_map_eth;
+
+
+// --------------- Calculate & Export Area of cocoa per department --------------- // 
+export_table(region_reducer(cocoa_map,departments),
+                     'area_under_cocoa_ha_gha',
+                     'Cocoa'); 
+
+
+// --------------- Load SUITABILITY data --------------- // 
+var suitability = ee.Image("users/valentinguye/ghana/cocoa_suitability").clip(AOI).reproject(AOI_projection,null,927.6624716641518);
+
+// The suitability layer is given in percentage (0-100%), we need to rescale it to a 0-1 layer
+var suitability01 = suitability.divide(100);
+
+// Resample suitability map to 10X10m
+var suitability01 = suitability01.resample("bicubic").reproject(cocoa_map.projection());
+
+Map.addLayer(suitability01, {min:0,max:1}, 'suitability01', false);
+Map.addLayer(cocoa_map, {min:0,max:1}, 'cocoa_map', false);
+
+// --------------- Calculate & Export Relative suitable cocoa area --------------- // 
+//  multiply the cocoa_map by the suitability to get relative suitable cocoa area
+var suitablecocoa = cocoa_map.multiply(suitability01);
+Map.addLayer(suitablecocoa, {min:0,max:1}, 'suitablecocoa', false);
+
+// Export CSV per department
+export_table(region_reducer(suitablecocoa.rename('suitable_cocoa_area_ha'),departments),
+        'suitable_cocoa_area_ha', 
+        'Cocoa');
+
+
+
+
+
+
+
