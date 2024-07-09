@@ -1,9 +1,9 @@
 
 
 
+library(sf)
 library(tidyverse)
 library(aws.s3)
-library(sf)
 library(dismo)
 library(units)
 library(readxl)
@@ -14,7 +14,7 @@ aws.signature::use_credentials()
 Sys.setenv("AWS_DEFAULT_REGION" = "eu-west-1")
 
 
-# This has villages that were actually not surveyed
+# This has villages that were actually not surveyed, but it has the distance variable, so read it for informative purpose. 
 sur_vil_dist <-
   s3read_using(
     object = "ghana/cocoa/displacement_econometrics/input_data/surveys_thomas/Village list with distance_Ghana.csv", 
@@ -33,15 +33,17 @@ sur_vil <-
   )
 
 # All villages
-#... 
+# unlike Deforestation analysis villages_Ghana.csv, this has consistent IDs with village IDs in Updated list of villages_Ghana survey.csv, 
+# so they can be joined
 all_vil <-
   s3read_using(
-    object = "ghana/cocoa/displacement_econometrics/input_data/surveys_thomas/Deforestation analysis villages_Ghana.csv", 
+    object = "ghana/cocoa/displacement_econometrics/input_data/surveys_thomas/Deforestation analysis villages_Ghana_ID_fixed.csv", 
     bucket = "trase-storage",
     FUN = read.csv,
     opts = c("check_region" = TRUE)
   ) %>% 
-  mutate(SURVEYED = if_else(surveyed...1.Yes..0.No. == 1, TRUE, FALSE))
+  mutate(SURVEYED = if_else(surveyed...1.Yes..0.No. == 1, TRUE, FALSE)) %>% 
+  dplyr::select(-`surveyed...1.Yes..0.No.`)
 
 # RMSC
 pas <- s3read_using(
@@ -76,49 +78,58 @@ set_units(st_area(pas), "hectare") %>% median()
 
 
 # Spatialize villages 
-all_vil <- 
+vill_points <- 
   all_vil %>% 
   st_as_sf(coords = c("POINT_X", "POINT_Y"), crs = 4326) %>%  
   st_transform(crs = st_crs(pas))
 
-ggplot(st_crop(pas, st_bbox(st_buffer(all_vil, 10000)))) + 
+ggplot(st_crop(pas, st_bbox(st_buffer(vill_points, 10000)))) + 
   geom_sf() +  
   geom_sf_text(aes(label = RMSCID), size = 3) + # , geometry = geom
-  geom_sf(data = all_vil) + 
+  geom_sf(data = vill_points) + 
   theme_minimal() 
 
 # restrict the AOI to a square including any park area within 10km from any village for now
 # (2km is the buffer depth Thomas chose to sample villages)
-parks_poly <- st_union(st_crop(pas, st_bbox(st_buffer(all_vil, 10000)))) %>% st_sf()
+parks_polyS <- st_crop(pas, st_bbox(st_buffer(vill_points, 10000))) %>% st_sf()
+parks_poly <- st_union(parks_polyS) %>% st_sf()
 # DON'T remove villages in parks for now. 
-# all_vil <- all_vil %>% filter(lengths(st_within(all_vil, st_union(pas))) == 0)
-vill_points <- all_vil
+# vill_points <- vill_points %>% filter(lengths(st_within(vill_points, st_union(pas))) == 0)
 
 ggplot(parks_poly) + 
   geom_sf() + 
   geom_sf(data = vill_points) + 
   theme_minimal() 
 
-make_units <- function(parks_poly, vill_points){
-  
+
 # Here, we do not set an in-park unit size (that would match the resolution of Schroth or gaez)
 # rather, the size of the polygons in-parks are determined by the number of villages around. 
 # Problem: we currently don't observe all villages. 
 # So we limit the polygon of every village in the opposite direction of the park, with a buffer. 
 # So we make a unionized buffer around villages of size M km
-# The size of the buffer is determined arbitrarily to 6km 
 
-# (Recall the average distance of households to their farms is ~2.7 km 
-# sur_vil_dist$mean_distance %>% mean(na.rm = T)
+# The size of the buffer is determined arbitrarily to 9km, because this fills the inner-parks space right. 
+buffer_km <- 9
+# This is a parameter for sensitivity checks. 
+# The trade-off is between including as many of every village's farms as possible, 
+# while not giving spurious space to villages that have more unobserved village neighbors and which voronois
+# are not thus not constrained while they should. 
+# (typically on parks' spikes in the outerbound of the region)
+
+# The average distance of households to their farms, averaged again across villages is ~2.7 km
+# But we would need the distribution across HH directly. 
+sur_vil_dist$mean_distance %>% summary()
+  
+ggplot(sur_vil_dist, aes(x=mean_distance)) +
+  geom_histogram(binwidth=.5, colour="black", fill="white")
+ggplot(sur_vil_dist, aes(x=median_distance)) +
+  geom_histogram(binwidth=.5, colour="black", fill="white")
+  
   buf_vil <-
     vill_points %>%
-    st_buffer(9000) %>%
+    st_buffer(buffer_km*1000) %>%
     st_union() %>% 
     st_as_sf()
-  
-  # make a buffer around the park, use the buffer depth Thomas chose to sample villages: 2km
-  # OUT_BUFFER_SIZE <- 2000
-  # out_buffer <- st_buffer(parks_poly, OUT_BUFFER_SIZE) %>% dplyr::select(-1) # (remove the park ID from this object, it's redundant)
   
   # create voronoi polygons
   voronoi_polys <- dismo::voronoi(st_coordinates(vill_points), ext = parks_poly)#buf_vil out_buffer
@@ -154,127 +165,108 @@ make_units <- function(parks_poly, vill_points){
     voronoi_sf %>% 
     filter(SURVEYED)
   
-  # ON EN EST LA, GERER LA PRODUCTION D'ID
-  
+
   # IN-PARK polygons
   inpark_sf <- 
-    voronoi_sf %>% 
-    # trim area outside the park - this drops polygons that are fully outside the parks
-    st_intersection(parks_poly)
+    sur_voronoi_sf %>% 
+    # trim area outside the park - this drops 6 villages which polygons are fully outside the parks
+    st_intersection(parks_polyS) # use the shape file with one polygon per park, so that 
+    # the intersection returns separate rows for different parks. 
   
   inpark_sf <- 
     inpark_sf %>% 
-    # rename(INPARK_ID = id) %>% 
-    mutate(AREA_HA = set_units(st_area(geometry), "hectares"), 
-           # UNIT_ID = paste0(RMSCID, "-", INPARK_ID),
-           IN_OUT = "INPARK")
+    mutate(POLYGON_AREA_HA = set_units(st_area(geometry), "hectares"), 
+           RMSC_VILLAGE_ID = paste0(RMSCID, "-", Village_ID),
+           IN_OUT = "INPARK") 
   
+  if(length(unique(inpark_sf$RMSC_VILLAGE_ID)) != nrow(inpark_sf)){stop("ID issue")}
   
   # OUT-PARK Polygons
   outpark_sf <- 
-    voronoi_sf %>% 
+    sur_voronoi_sf %>% 
     # remove inner park (this drops features that are fully in the park) - so the ids
-    st_difference(parks_poly) %>% 
-    # keep only area within outter buffer
-    st_intersection(out_buffer)
+    st_difference(parks_poly) 
     # # remove area that falls within other parks (not necessary if parks_poly is already the union)
     # st_difference(pas_union)
   
   outpark_sf <- 
     outpark_sf %>% 
-    # rename(INPARK_ID = id) %>% 
-    mutate(AREA_HA = set_units(st_area(geometry), "hectares"), 
-           # UNIT_ID = paste0(RMSCID, "-", INPARK_ID),
+    mutate(POLYGON_AREA_HA = set_units(st_area(geometry), "hectares"), 
+           RMSC_VILLAGE_ID = paste0("OUTPARK-", Village_ID),
            IN_OUT = "OUTPARK")
   
   
-  mean(set_units(outpark_sf$AREA_HA, "hectare"))
+  mean(set_units(outpark_sf$POLYGON_AREA_HA, "hectare"))
+  mean(set_units(inpark_sf$POLYGON_AREA_HA, "hectare"))
   
   # Keep only in-park polygons that have a matching treatment polygon outside
-  # inpark_sf <- 
-  #   inpark_sf %>% 
-  #   filter(INPARK_ID %in% outpark_sf$INPARK_ID)
+  # inpark_sf <-
+  #   inpark_sf %>%
+  #   filter(Village_ID %in% outpark_sf$Village_ID)
+  # No, because for now we want to keep those villages (only 1 actually) which polyon is only within a park. 
   
   ggplot() + 
     theme_minimal() +
     geom_sf(data = parks_poly) +
     geom_sf(data = vill_points, aes(col = SURVEYED)) +
-    geom_sf(data = voronoi_sf, alpha = 0) +
+    geom_sf(data = sur_voronoi_sf, alpha = 0) +
     scale_color_discrete(guide = guide_legend(title = "Surveyed")) + 
     geom_sf(data = inpark_sf, fill = "green", alpha = 0.5) + 
-    geom_sf(data = outpark_sf, fill = "grey", alpha = 0.5) 
+    geom_sf(data = outpark_sf, fill = "lightblue", alpha = 0.5) 
   
-  
-  # ggplot(parks_poly) + 
-  #   geom_sf(fill = "white") +
-  #   theme_minimal()
-  # 
-  # ggplot(inpark_sf) + 
-  #   geom_sf(fill = "white") + 
-  #   theme_minimal()
-  # 
-  # ggplot(outpark_sf) + 
-  #   geom_sf(aes(fill = UNIT_ID)) +
-  #   geom_sf(data = st_geometry(parks_poly), aes(fill = NA)) +
-  #   geom_sf(data = st_geometry(inpark_sf), aes(), fill = "white") + 
-  #   theme_minimal()
-  
-  plot(st_geometry(parks_poly))
-  plot(st_geometry(inpark_sf), add = T)
-  plot(outpark_sf[,"INPARK_ID"], add = T) 
   
   # # Check that in and out polygons have the same ID
-  # plot(st_geometry(parks_poly))
-  # plot(st_geometry(inpark_sf[1,"INPARK_ID"]), add = T)
-  # plot(outpark_sf[outpark_sf$INPARK_ID==inpark_sf[1,]$INPARK_ID, "INPARK_ID"], add = T)
+  plot(st_geometry(parks_poly))
+  plot(st_geometry(inpark_sf[1:10,"Village_ID"]), add = T)
+  plot(outpark_sf[outpark_sf$Village_ID %in% inpark_sf[1:10,]$Village_ID, "Village_ID"], add = T)
   
   # stack in- and out-park polygons
   
-  in_out_sf <- rbind(inpark_sf, outpark_sf)
+  in_out_sf <- 
+    inpark_sf %>% 
+    dplyr::select(names(outpark_sf)) %>% 
+    rbind(outpark_sf) %>% 
+    arrange(Village_ID) 
   
 
+### EXPORT -----------
   
-  # DISC METHOD
-  # # Now extract lines at the intersection of these equal area shapes and the park boundaries
-  # # Define the parc as a MULTILINESTRING, rather than a MULTIPOLYGON
-  # park_bnd  <- st_boundary(parks_poly) %>% st_geometry()# keep only the geometry, to not repeat the id
-  # park_bnd == st_cast(parks_poly, to = "MULTILINESTRING") %>% st_geometry() # (yields exactly the same)
-  # 
-  # # this has less or as many features as equal_areas, because it drops the equal_areas features that are entirely within the park.   
-  # edges <- st_intersection(equal_areas, park_bnd)
-  # # some are only points, remove them
-  # # st_geometry_type(edges$geometry)
-  # # edges <- edges %>% filter(!grepl("POINT", st_geometry_type(geometry)))
-  # 
-  # # edges2 <- edges %>% filter(st_geometry_type(geometry) == "MULTILINESTRING") %>% st_line_merge()
-  # 
-  # # equal_area_55 <-  equal_areas %>% filter(INPARK_ID==19)
-  # # edge_55 <- edges %>% filter(INPARK_ID==19)
-  # # plot(st_geometry(equal_area_55))
-  # # plot(st_geometry(edge_55), add = T, col = "red")
-  # 
-  #   # define buffer radius such that the area of the disc is two times the equal area 
-  # radius = sqrt(2*mean(set_units(equal_areas$area, NULL))/pi)
-  # 
-  # disc_centro <- 
-  #   edges %>% 
-  #   st_centroid() 
-  # 
-  # tmt_disc <- 
-  #   edges %>% 
-  #   st_centroid() %>% 
-  #   st_buffer(radius) %>% 
-  #   # remove the part inside the park to define the treatment zone
-  #   st_difference(parks_poly)
-  # 
-  # # # Since this leaves significant shares of PA borders uncovered by treatment discs, add a buffer area
-  # # # Another method is to make a buffer around the edges
-  # # tmt_buf <- 
-  # #   edges %>% 
-  # #   st_buffer(radius) %>% 
-  # #   # remove the part inside the park to define the treatment zone
-  # #   st_difference(parks_poly)
+  inpark_sf <- in_out_sf %>% filter(IN_OUT == "INPARK")
+  outpark_sf <- in_out_sf %>% filter(IN_OUT == "OUTPARK")
   
-  return(in_out_sf)
-}
-rm(parks_poly, inpark_unit_size)
+  # Export as geojson
+  dir.create("temp_data/park_village_voronois/")
+  st_write(inpark_sf, paste0("temp_data/park_village_voronois/rmsc_inpark_village_voronois_", buffer_km,"km.shp"), append = FALSE)
+  
+  dir.create("C:/Users/guye/OneDrive - UCL/shared_repository_UCLouvain_Cambridge/park_village_voronois/")
+  st_write(inpark_sf, 
+           paste0("C:/Users/guye/OneDrive - UCL/shared_repository_UCLouvain_Cambridge/park_village_voronois/rmsc_inpark_village_voronois_", 
+                  buffer_km,"km.shp"), 
+           append = FALSE)
+  
+  # s3write_using(
+  #   x = inpark_sf,
+  #   object = paste0("ghana/cocoa/displacement_econometrics/rmsc_inpark_village_voronois_", buffer_km,"km"),
+  #   FUN = st_write,
+  #   driver = "GeoJSON",
+  #   bucket = "trase-storage",
+  #   opts = c("check_region" = T)
+  # )
+  
+  
+  # Export as geojson
+  st_write(outpark_sf, paste0("temp_data/park_village_voronois/rmsc_outpark_village_voronois_", buffer_km,"km.shp"), append = FALSE)
+  
+  st_write(outpark_sf, 
+           paste0("C:/Users/guye/OneDrive - UCL/shared_repository_UCLouvain_Cambridge/park_village_voronois/rmsc_outpark_village_voronois_", 
+                  buffer_km,"km.shp"), 
+           append = FALSE)
+  # s3write_using(
+  #   x = outpark_sf,
+  #   object = paste0("ghana/cocoa/displacement_econometrics/rmsc_outpark_village_voronois_", buffer_km,"km.shp"),
+  #   FUN = st_write,
+  #   driver = "GeoJSON",
+  #   bucket = "trase-storage",
+  #   opts = c("check_region" = T)
+  # )
+  
