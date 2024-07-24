@@ -10,6 +10,7 @@ library(readxl)
 library(xlsx)
 library(stringr)
 library(DescTools)
+library(dismo) # for voronoi
 aws.signature::use_credentials()
 Sys.setenv("AWS_DEFAULT_REGION" = "eu-west-1")
 
@@ -37,13 +38,32 @@ sur_vil <-
 # so they can be joined
 all_vil <-
   s3read_using(
-    object = "ghana/cocoa/displacement_econometrics/input_data/surveys_thomas/Deforestation analysis villages_Ghana_ID_fixed.csv", 
+    object = "ghana/cocoa/displacement_econometrics/input_data/surveys_thomas/Ghana villages_10km_final.csv",
     bucket = "trase-storage",
     FUN = read.csv,
     opts = c("check_region" = TRUE)
-  ) %>% 
-  mutate(SURVEYED = if_else(surveyed...1.Yes..0.No. == 1, TRUE, FALSE)) %>% 
+  ) %>%
+  mutate(SURVEYED = if_else(survyeyed. == 1, TRUE, FALSE)) %>%
+  dplyr::select(-`survyeyed.`) %>% 
+  rename(Village_ID = village_ID, 
+         Village.name = name_pt, 
+         Settlement = fclass_pt, 
+         POINT_X = X, 
+         POINT_Y = Y)
+
+all_vil_old <-
+  s3read_using(
+    object = "ghana/cocoa/displacement_econometrics/input_data/surveys_thomas/Deforestation analysis villages_Ghana_ID_fixed.csv",
+    bucket = "trase-storage",
+    FUN = read.csv,
+    opts = c("check_region" = TRUE)
+  ) %>%
+  mutate(SURVEYED = if_else(surveyed...1.Yes..0.No. == 1, TRUE, FALSE)) %>%
   dplyr::select(-`surveyed...1.Yes..0.No.`)
+
+all_vil_sur <- all_vil %>% filter(SURVEYED) %>% arrange(desc(Village_ID))
+all_vil_old_sur <- all_vil_old %>% dplyr::select(-Forest_reserve) %>% filter(SURVEYED) %>% arrange(desc(Village_ID))
+all.equal(all_vil_sur, all_vil_old_sur)
 
 # RMSC
 pas <- s3read_using(
@@ -102,20 +122,59 @@ ggplot(parks_poly) +
   theme_minimal() 
 
 
+  # group village points that are less than 1km apart in a single village point. 
+  distances <- 
+    vill_points %>% 
+    st_distance()
+  # this produces a list column, with every element being a vector of the index of points closer than the threshold. 
+  vill_points$DM_WITHIN_1KM <- apply(distances, 1, function(x) {which(x<=1000) }) # st_distance returns meters
+
+# just for checks 
+close_vill <- 
+  vill_points %>% 
+  filter(lengths(DM_WITHIN_1KM) > 1) 
+
+close_vill_centro <- 
+  close_vill %>% 
+  group_by(DM_WITHIN_1KM) %>% 
+  summarize(
+    Village_ID = min(Village_ID),
+    Village.name = Village.name[1],
+    SURVEYED = any(SURVEYED),
+    geometry = st_centroid(st_union(geometry))) %>% 
+  ungroup()
+
+ggplot(parks_poly) + 
+  geom_sf() +
+  geom_sf(data = close_vill) + 
+  geom_sf(data = close_vill_centro, col = "red") + 
+  theme_minimal() 
+
+# this doesn't work
+# dm_within_1km <- st_is_within_distance(vill_points, dist = 1000, sparse = FALSE)
+# vill_points <- 
+#   vill_points %>% 
+#   mutate(DM_WITHIN_1KM = apply(dm_within_1km, 1, function(x){x}))
+
+  # Merge close-by villages together
+  vill_points <-
+    vill_points %>% 
+    group_by(DM_WITHIN_1KM) %>% 
+    summarize(
+      Village_ID = min(Village_ID),
+      Village.name = Village.name[1],
+      SURVEYED = any(SURVEYED),
+      geometry = st_centroid(st_union(geometry))) %>% 
+    ungroup() %>% 
+    dplyr::select(-DM_WITHIN_1KM)
+
+
 # Here, we do not set an in-park unit size (that would match the resolution of Schroth or gaez)
 # rather, the size of the polygons in-parks are determined by the number of villages around. 
-# Problem: we currently don't observe all villages. 
-# So we limit the polygon of every village in the opposite direction of the park, with a buffer. 
-# So we make a unionized buffer around villages of size M km
+# This is not a problem (anymore) as we do observe all villages. 
+# For previous solution that used a buffer around park, see Github versions earlier to 24/07/2024 
 
-# The size of the buffer is determined arbitrarily to 9km, because this fills the inner-parks space right. 
-buffer_km <- 9
-# This is a parameter for sensitivity checks. 
-# The trade-off is between including as many of every village's farms as possible, 
-# while not giving spurious space to villages that have more unobserved village neighbors and which voronois
-# are not thus not constrained while they should. 
-# (typically on parks' spikes in the outerbound of the region)
-
+# Distances to farm (not useful anymore)
 # The average distance of households to their farms, averaged again across villages is ~2.7 km
 # But we would need the distribution across HH directly. 
 sur_vil_dist$mean_distance %>% summary()
@@ -125,11 +184,7 @@ ggplot(sur_vil_dist, aes(x=mean_distance)) +
 ggplot(sur_vil_dist, aes(x=median_distance)) +
   geom_histogram(binwidth=.5, colour="black", fill="white")
   
-  buf_vil <-
-    vill_points %>%
-    st_buffer(buffer_km*1000) %>%
-    st_union() %>% 
-    st_as_sf()
+
   
   # create voronoi polygons
   voronoi_polys <- dismo::voronoi(st_coordinates(vill_points), ext = parks_poly)#buf_vil out_buffer
@@ -147,11 +202,6 @@ ggplot(sur_vil_dist, aes(x=median_distance)) +
   voronoi_sf <- 
     voronoi_sf %>% 
     left_join(st_drop_geometry(vill_points), by = "ROW_INDEX")
-  
-  # trim voronoi polygons by an arbitrary buffer around parks 
-  voronoi_sf <- 
-    voronoi_sf %>% 
-    st_intersection(buf_vil)
   
   ggplot() + 
     theme_minimal() +
@@ -236,12 +286,11 @@ ggplot(sur_vil_dist, aes(x=median_distance)) +
   
   # Export as geojson
   dir.create("temp_data/park_village_voronois/")
-  st_write(inpark_sf, paste0("temp_data/park_village_voronois/rmsc_inpark_village_voronois_", buffer_km,"km.shp"), append = FALSE)
+  st_write(inpark_sf, paste0("temp_data/park_village_voronois/rmsc_inpark_village_voronois_merged1km.shp"), append = FALSE)
   
   dir.create("C:/Users/guye/OneDrive - UCL/shared_repository_UCLouvain_Cambridge/park_village_voronois/")
   st_write(inpark_sf, 
-           paste0("C:/Users/guye/OneDrive - UCL/shared_repository_UCLouvain_Cambridge/park_village_voronois/rmsc_inpark_village_voronois_", 
-                  buffer_km,"km.shp"), 
+           paste0("C:/Users/guye/OneDrive - UCL/shared_repository_UCLouvain_Cambridge/park_village_voronois/rmsc_inpark_village_voronois_merged1km.shp"), 
            append = FALSE)
   
   # s3write_using(
@@ -255,11 +304,10 @@ ggplot(sur_vil_dist, aes(x=median_distance)) +
   
   
   # Export as geojson
-  st_write(outpark_sf, paste0("temp_data/park_village_voronois/rmsc_outpark_village_voronois_", buffer_km,"km.shp"), append = FALSE)
+  st_write(outpark_sf, paste0("temp_data/park_village_voronois/rmsc_outpark_village_voronois_merged1km.shp"), append = FALSE)
   
   st_write(outpark_sf, 
-           paste0("C:/Users/guye/OneDrive - UCL/shared_repository_UCLouvain_Cambridge/park_village_voronois/rmsc_outpark_village_voronois_", 
-                  buffer_km,"km.shp"), 
+           paste0("C:/Users/guye/OneDrive - UCL/shared_repository_UCLouvain_Cambridge/park_village_voronois/rmsc_outpark_village_voronois_merged1km.shp"), 
            append = FALSE)
   # s3write_using(
   #   x = outpark_sf,
